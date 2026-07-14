@@ -273,85 +273,59 @@ class RADOSGWCollector(object):
             ),
         }
 
-    def _get_usage(self, entry):
-        """
-        Recieves JSON object 'entity' that contains all the buckets relating
-        to a given RGW UID. Builds a dictionary of metric data in order to
-        handle UIDs where the usage data is truncated into multiple 1000
-        entry bins.
-        """
+      def _get_usage(self, entry):
+          """
+          Recieves JSON object 'entity' that contains all the buckets relating
+          to a given RGW UID. Builds a dictionary of metric data in order to
+          handle UIDs where the usage data is truncated into multiple 1000
+          entry bins.
+          """
 
-        if "owner" in entry:
-            bucket_owner = entry["owner"]
-        # Luminous
-        elif "user" in entry:
-            bucket_owner = entry["user"]
+          if "owner" in entry:
+              bucket_owner = entry["owner"]
+          # Luminous
+          elif "user" in entry:
+              bucket_owner = entry["user"]
 
-        if bucket_owner not in list(self.usage_dict.keys()):
-            self.usage_dict[bucket_owner] = defaultdict(dict)
+          if bucket_owner not in list(self.usage_dict.keys()):
+              self.usage_dict[bucket_owner] = defaultdict(dict)
 
-        for bucket in entry["buckets"]:
-          try:
-              logging.debug((json.dumps(bucket, indent=4, sort_keys=True)))
-        
-              if not bucket["bucket"]:
-                  bucket_name = "bucket_root"
-              else:
-                  bucket_name = bucket["bucket"]
-        
-              if bucket_name not in list(self.usage_dict[bucket_owner].keys()):
-                  self.usage_dict[bucket_owner][bucket_name] = defaultdict(dict)
-        
-              for category in bucket["categories"]:
-                  category_name = category["category"]
-                  if category_name not in list(
-                      self.usage_dict[bucket_owner][bucket_name].keys()
-                  ):
-                      self.usage_dict[bucket_owner][bucket_name][
-                          category_name
-                      ] = Counter()
-                  c = self.usage_dict[bucket_owner][bucket_name][category_name]
-                  c.update(
-                      {
-                          "ops": category.get("ops", 0),
-                          "successful_ops": category.get("successful_ops", 0),
-                          "bytes_sent": category.get("bytes_sent", 0),
-                          "bytes_received": category.get("bytes_received", 0),
-                      }
+          for bucket in entry["buckets"]:
+              try:
+                  logging.debug((json.dumps(bucket, indent=4, sort_keys=True)))
+
+                  if not bucket["bucket"]:
+                      bucket_name = "bucket_root"
+                  else:
+                      bucket_name = bucket["bucket"]
+
+                  if bucket_name not in list(self.usage_dict[bucket_owner].keys()):
+                      self.usage_dict[bucket_owner][bucket_name] = defaultdict(dict)
+
+                  for category in bucket["categories"]:
+                      category_name = category["category"]
+                      if category_name not in list(
+                          self.usage_dict[bucket_owner][bucket_name].keys()
+                      ):
+                          self.usage_dict[bucket_owner][bucket_name][
+                              category_name
+                          ] = Counter()
+                      c = self.usage_dict[bucket_owner][bucket_name][category_name]
+                      c.update(
+                          {
+                              "ops": category.get("ops", 0),
+                              "successful_ops": category.get("successful_ops", 0),
+                              "bytes_sent": category.get("bytes_sent", 0),
+                              "bytes_received": category.get("bytes_received", 0),
+                          }
+                      )
+              except (KeyError, TypeError) as e:
+                  logging.warning(
+                      "Skipping malformed usage entry for bucket %r: %s",
+                      bucket.get("bucket", "?") if isinstance(bucket, dict) else "?",
+                      e,
                   )
-          except (KeyError, TypeError) as e:
-              logging.warning(
-                  "Skipping malformed usage entry for bucket %r: %s",
-                  bucket.get("bucket", "?") if isinstance(bucket, dict) else "?",
-                  e,
-              )
-              continue
-
-    def _update_usage_metrics(self):
-        """
-        Update promethes metrics with bucket usage data
-        """
-
-        for bucket_owner in list(self.usage_dict.keys()):
-            for bucket_name in list(self.usage_dict[bucket_owner].keys()):
-                for category in list(self.usage_dict[bucket_owner][bucket_name].keys()):
-                    data_dict = self.usage_dict[bucket_owner][bucket_name][category]
-
-                    # Build metrics labels to match the label schema
-                    u_metrics = [bucket_name, bucket_owner, category, self.store]
-
-                    # Add empty strings for tag labels (usage API doesn't provide tags)
-                    if self.tag_list:
-                        u_metrics = u_metrics + [""] * len(self.tag_list.split(","))
-
-                    # Add namespace if extraction is enabled
-                    if self.enable_namespace_extraction:
-                        bucket_namespace = get_bucket_namespace(bucket_name, bucket_owner, self.obc_name_prefix)
-                        u_metrics.append(bucket_namespace)
-                    self._prometheus_metrics["ops"].add_metric(u_metrics, data_dict.get("ops", 0))
-                    self._prometheus_metrics["successful_ops"].add_metric(u_metrics, data_dict.get("successful_ops", 0))
-                    self._prometheus_metrics["bytes_sent"].add_metric(u_metrics, data_dict.get("bytes_sent", 0))
-                    self._prometheus_metrics["bytes_received"].add_metric(u_metrics, data_dict.get("bytes_received", 0))
+                  continue
 
     def _get_bucket_usage(self, bucket):
         """
