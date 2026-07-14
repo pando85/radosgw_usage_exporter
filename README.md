@@ -8,7 +8,7 @@ This exporter was based off from both
 (https://www.robustperception.io/writing-a-jenkins-exporter-in-python/) and the more elaborate
 Jenkins exporter here (https://github.com/lovoo/jenkins_exporter).
 
-## Requirements
+## Requirements 
 
 - Working Ceph Cluster with Object Gateways setup.
 - Ceph RADOSGWs must beconfigured to gather usage information as this is not on by default. The
