@@ -291,38 +291,41 @@ class RADOSGWCollector(object):
             self.usage_dict[bucket_owner] = defaultdict(dict)
 
         for bucket in entry["buckets"]:
-            try:
-                logging.debug((json.dumps(bucket, indent=4, sort_keys=True)))
-                if not bucket["bucket"]:
-                    bucket_name = "bucket_root"
-                else:
-                    bucket_name = bucket["bucket"]
-                # ... existing category loop ...
-            except (KeyError, TypeError) as e:
-                logging.warning("Skipping malformed usage entry for bucket %r: %s",
-                                bucket.get("bucket", "?"), e)
-                continue
-
-            if bucket_name not in list(self.usage_dict[bucket_owner].keys()):
-                self.usage_dict[bucket_owner][bucket_name] = defaultdict(dict)
-
-            for category in bucket["categories"]:
-                category_name = category["category"]
-                if category_name not in list(
-                    self.usage_dict[bucket_owner][bucket_name].keys()
-                ):
-                    self.usage_dict[bucket_owner][bucket_name][
-                        category_name
-                    ] = Counter()
-                c = self.usage_dict[bucket_owner][bucket_name][category_name]
-                c.update(
-                    {
-                        "ops": category.get("ops", 0),
-                        "successful_ops": category.get("successful_ops", 0),
-                        "bytes_sent": category.get("bytes_sent", 0),
-                        "bytes_received": category.get("bytes_received", 0),
-                    }
-                )
+          try:
+              logging.debug((json.dumps(bucket, indent=4, sort_keys=True)))
+        
+              if not bucket["bucket"]:
+                  bucket_name = "bucket_root"
+              else:
+                  bucket_name = bucket["bucket"]
+        
+              if bucket_name not in list(self.usage_dict[bucket_owner].keys()):
+                  self.usage_dict[bucket_owner][bucket_name] = defaultdict(dict)
+        
+              for category in bucket["categories"]:
+                  category_name = category["category"]
+                  if category_name not in list(
+                      self.usage_dict[bucket_owner][bucket_name].keys()
+                  ):
+                      self.usage_dict[bucket_owner][bucket_name][
+                          category_name
+                      ] = Counter()
+                  c = self.usage_dict[bucket_owner][bucket_name][category_name]
+                  c.update(
+                      {
+                          "ops": category.get("ops", 0),
+                          "successful_ops": category.get("successful_ops", 0),
+                          "bytes_sent": category.get("bytes_sent", 0),
+                          "bytes_received": category.get("bytes_received", 0),
+                      }
+                  )
+          except (KeyError, TypeError) as e:
+              logging.warning(
+                  "Skipping malformed usage entry for bucket %r: %s",
+                  bucket.get("bucket", "?") if isinstance(bucket, dict) else "?",
+                  e,
+              )
+              continue
 
     def _update_usage_metrics(self):
         """
