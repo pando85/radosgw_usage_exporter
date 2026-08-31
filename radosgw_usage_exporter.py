@@ -700,6 +700,22 @@ def get_bucket_namespace(bucket_name, bucket_owner, obc_name_prefix):
     if idx != -1:
         return owner_no_prefix[:idx]
 
+    # Case 3.5: Owner contains the literal OBC prefix delimiter (e.g. "-bucket-").
+    # Handles deployments that set an explicit bucketName equal to the full
+    # "<namespace>-<prefix><obcName>" string, so bucket_name/owner_no_prefix are
+    # identical and cases 1-3 (which compare against cleaned_bucket_name) can't
+    # find a boundary. The prefix itself is a fixed structural delimiter Rook
+    # inserts exactly once between namespace and obcName, so its first
+    # occurrence is the correct split point, regardless of what cleaned_bucket_name
+    # contains. Only applies when obc_name_prefix is set - an empty prefix would
+    # turn this into a degenerate "-" search.
+    stripped_prefix = obc_name_prefix.rstrip("-") if obc_name_prefix else ""
+    if stripped_prefix:
+        delimiter = f"-{stripped_prefix}-"
+        idx = owner_no_prefix.find(delimiter)
+        if idx != -1:
+            return owner_no_prefix[:idx]
+
     # Case 4: Fuzzy matching - look for bucket name components
     # Split bucket name by hyphens and try to find where these parts appear in owner
     bucket_parts = cleaned_bucket_name.split("-")
