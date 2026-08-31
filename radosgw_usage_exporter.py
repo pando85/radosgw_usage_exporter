@@ -54,7 +54,16 @@ class RADOSGWCollector(object):
         rgw_bucket = self._request_data(query="bucket", args="stats=True")
         rgw_users = self._get_rgw_users()
 
-        data = MetricsSet(self, rgw_usage, rgw_bucket, rgw_users, self.store, self.tag_list)
+        data = MetricsSet(
+            self,
+            rgw_usage,
+            rgw_bucket,
+            rgw_users,
+            self.store,
+            self.tag_list,
+            self.enable_namespace_extraction,
+            self.obc_name_prefix,
+        )
         yield from data.collect()
     
 
@@ -128,7 +137,15 @@ class RADOSGWCollector(object):
 
 class MetricsSet:
     def __init__(
-        self, collector, rgw_usage, rgw_bucket, rgw_users, store, tag_list
+        self,
+        collector,
+        rgw_usage,
+        rgw_bucket,
+        rgw_users,
+        store,
+        tag_list,
+        enable_namespace_extraction,
+        obc_name_prefix,
     ):
         self.collector = collector
         self.rgw_usage = rgw_usage
@@ -136,6 +153,8 @@ class MetricsSet:
         self.rgw_users = rgw_users
         self.store = store
         self.tag_list = tag_list
+        self.enable_namespace_extraction = enable_namespace_extraction
+        self.obc_name_prefix = obc_name_prefix
 
     def collect(self):
         """

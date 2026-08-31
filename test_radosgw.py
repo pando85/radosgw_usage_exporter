@@ -1,5 +1,7 @@
+import threading
 import unittest
-from radosgw_usage_exporter import get_bucket_namespace
+from unittest.mock import patch
+from radosgw_usage_exporter import RADOSGWCollector, MetricsSet, get_bucket_namespace
 
 class TestGetBucketNamespace(unittest.TestCase):
     def test_namespace_extraction_from_data(self):
@@ -117,6 +119,177 @@ class TestGetBucketNamespace(unittest.TestCase):
         bucket_name = "production-agent-places-bucket-webcontent-cache"
         bucket_owner = "obc-production-agent-places-bucket-webcontent-cache-739f1eaa-7ddf-46ea-89ec-8e50c45f84eb"
         self.assertEqual(get_bucket_namespace(bucket_name, bucket_owner, ""), "production-agent")
+
+def _make_collector(enable_namespace_extraction):
+    return RADOSGWCollector(
+        host="http://localhost",
+        admin_entry="admin",
+        access_key="x",
+        secret_key="y",
+        store="test",
+        insecure=True,
+        timeout=10,
+        tag_list=[],
+        enable_namespace_extraction=enable_namespace_extraction,
+        obc_name_prefix="bucket-",
+    )
+
+
+_USAGE_ENTRIES = {
+    "entries": [
+        {
+            "owner": "obc-team-a-bucket-alpha-uuid",
+            "buckets": [
+                {
+                    "bucket": "alpha",
+                    "categories": [
+                        {
+                            "category": "put_obj",
+                            "bytes_sent": 0,
+                            "bytes_received": 100,
+                            "ops": 1,
+                            "successful_ops": 1,
+                        }
+                    ],
+                }
+            ],
+        }
+    ]
+}
+
+_BUCKET_STATS = [
+    {
+        "bucket": "alpha",
+        "owner": "obc-team-a-bucket-alpha-uuid",
+        "num_shards": 11,
+        "zonegroup": "eu-central-1",
+        "usage": {"rgw.main": {"size_actual": 100, "num_objects": 1}},
+        "bucket_quota": {
+            "max_size": 1000,
+            "max_size_kb": 1,
+            "max_objects": 100,
+            "enabled": True,
+        },
+    }
+]
+
+
+def _fake_request_data(query, args):
+    if query == "usage":
+        return _USAGE_ENTRIES
+    if query == "bucket":
+        return _BUCKET_STATS
+    return None
+
+
+class TestCollectEndToEnd(unittest.TestCase):
+    # Regression test for the exact bug fixed on top of PR #1 ("Split metrics
+    # building from the collector"): moving state into MetricsSet without
+    # threading enable_namespace_extraction/obc_name_prefix through its
+    # __init__ made every collect() call raise AttributeError, unconditionally,
+    # regardless of whether extraction was even enabled. Unit tests against
+    # get_bucket_namespace() alone never exercise collect(), so this class of
+    # bug was invisible to the existing suite - this is why it shipped.
+    def test_collect_succeeds_with_namespace_extraction_enabled(self):
+        collector = _make_collector(enable_namespace_extraction=True)
+        with patch.object(collector, "_request_data", side_effect=_fake_request_data), \
+             patch.object(collector, "_get_rgw_users", return_value=None):
+            metrics = list(collector.collect())
+        self.assertTrue(metrics)
+
+    def test_collect_succeeds_with_namespace_extraction_disabled(self):
+        collector = _make_collector(enable_namespace_extraction=False)
+        with patch.object(collector, "_request_data", side_effect=_fake_request_data), \
+             patch.object(collector, "_get_rgw_users", return_value=None):
+            metrics = list(collector.collect())
+        self.assertTrue(metrics)
+
+
+class TestConcurrentCollectIsolation(unittest.TestCase):
+    # Regression test for PR #1's actual stated purpose: two overlapping
+    # collect() calls against one shared RADOSGWCollector must not share
+    # mutable state. Before the PR, usage_dict/_prometheus_metrics lived on
+    # the shared collector itself, so one request's in-progress state could
+    # be reset or overwritten by a second request running concurrently.
+    #
+    # This forces a genuine interleave rather than relying on GIL-timing luck:
+    # thread A runs collect() up through its own _setup_empty_prometheus_metrics
+    # reset, then blocks; thread B (identical input data) runs its entire
+    # collect() to completion while A is blocked; A is then released to finish.
+    # With per-call state (the fix), A's result is unaffected by B running
+    # concurrently. With shared state (the bug), B's reset/write would corrupt
+    # or blank out what A had already started, and this test fails.
+    def test_two_overlapping_collects_do_not_corrupt_each_other(self):
+        collector = _make_collector(enable_namespace_extraction=False)
+        real_setup = MetricsSet._setup_empty_prometheus_metrics
+        call_index = {"n": 0}
+        call_lock = threading.Lock()
+        a_ready = threading.Event()
+        b_done = threading.Event()
+
+        def synced_setup(self, args):
+            real_setup(self, args)
+            with call_lock:
+                call_index["n"] += 1
+                is_first = call_index["n"] == 1
+            if is_first:
+                a_ready.set()
+                if not b_done.wait(timeout=5):
+                    raise AssertionError("thread B did not finish in time")
+            else:
+                if not a_ready.wait(timeout=5):
+                    raise AssertionError("thread A did not reach sync point in time")
+
+        results = {}
+        errors = []
+
+        def run(key):
+            try:
+                with patch.object(collector, "_request_data", side_effect=_fake_request_data), \
+                     patch.object(collector, "_get_rgw_users", return_value=None), \
+                     patch.object(MetricsSet, "_setup_empty_prometheus_metrics", synced_setup):
+                    results[key] = list(collector.collect())
+            except Exception as exc:  # pragma: no cover - surfaced via errors list
+                errors.append(exc)
+            finally:
+                if key == "b":
+                    b_done.set()
+
+        thread_a = threading.Thread(target=run, args=("a",))
+        thread_b = threading.Thread(target=run, args=("b",))
+        thread_a.start()
+        a_ready.wait(timeout=5)
+        thread_b.start()
+        thread_a.join(timeout=10)
+        thread_b.join(timeout=10)
+
+        self.assertFalse(errors, f"collect() raised: {errors}")
+        self.assertIn("a", results)
+        self.assertIn("b", results)
+
+        for key in ("a", "b"):
+            all_samples = [
+                (sample.name, tuple(sorted(sample.labels.items())))
+                for family in results[key]
+                for sample in family.samples
+            ]
+            unique_samples = set(all_samples)
+            alpha_bytes = [
+                sample.value
+                for family in results[key]
+                for sample in family.samples
+                if sample.name == "radosgw_usage_bucket_bytes"
+            ]
+            self.assertEqual(
+                alpha_bytes, [100],
+                f"thread {key}: expected exactly one alpha-bucket sample of 100 bytes, "
+                f"got {alpha_bytes} (duplicate/missing samples indicate shared-state corruption)",
+            )
+            self.assertEqual(
+                len(all_samples), len(unique_samples),
+                f"thread {key}: duplicate (name, labels) sample pairs found - shared-state corruption",
+            )
+
 
 if __name__ == '__main__':
     unittest.main()
