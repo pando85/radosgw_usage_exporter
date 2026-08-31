@@ -48,45 +48,31 @@ class RADOSGWCollector(object):
         self.url = "{0}{1}/".format(self.host, admin_entry)
         # Prepare Requests Session
         self._session()
-
+    
     def collect(self):
-        """
-        * Collect 'usage' data:
-            http://docs.ceph.com/docs/master/radosgw/adminops/#get-usage
-        * Collect 'bucket' data:
-            http://docs.ceph.com/docs/master/radosgw/adminops/#get-bucket-info
-        """
-
-        start = time.time()
-        # setup empty prometheus metrics
-        self._setup_empty_prometheus_metrics(args="")
-
-        # setup dict for aggregating bucket usage accross "bins"
-        self.usage_dict = defaultdict(dict)
-
         rgw_usage = self._request_data(query="usage", args="show-summary=False")
         rgw_bucket = self._request_data(query="bucket", args="stats=True")
         rgw_users = self._get_rgw_users()
 
-        # populate metrics with data
-        if rgw_usage:
-            for entry in rgw_usage["entries"]:
-                self._get_usage(entry)
-            self._update_usage_metrics()
+        data = MetricsSet(self, rgw_usage, rgw_bucket, rgw_users, self.store, self.tag_list)
+        yield from data.collect()
+    
 
-        if rgw_bucket:
-            for bucket in rgw_bucket:
-                self._get_bucket_usage(bucket)
+    def _get_rgw_users(self):
+        """
+        API request to get users.
+        """
 
-        if rgw_users:
-            for user in rgw_users:
-                self._get_user_info(user)
+        rgw_users = self._request_data(query="user", args="list")
 
-        duration = time.time() - start
-        self._prometheus_metrics["scrape_duration_seconds"].add_metric([], duration)
+        if rgw_users and "keys" in rgw_users:
+            return rgw_users["keys"]
+        else:
+            # Compat with old Ceph versions (pre 12.2.13/13.2.9)
+            rgw_metadata_users = self._request_data(query="metadata/user", args="")
+            return rgw_metadata_users
 
-        for metric in list(self._prometheus_metrics.values()):
-            yield metric
+        return
 
     def _session(self):
         """
@@ -138,6 +124,53 @@ class RADOSGWCollector(object):
         except requests.exceptions.RequestException as e:
             logging.info(("Request error: {0}".format(e)))
             return
+
+
+class MetricsSet:
+    def __init__(
+        self, collector, rgw_usage, rgw_bucket, rgw_users, store, tag_list
+    ):
+        self.collector = collector
+        self.rgw_usage = rgw_usage
+        self.rgw_bucket = rgw_bucket
+        self.rgw_users = rgw_users
+        self.store = store
+        self.tag_list = tag_list
+
+    def collect(self):
+        """
+        * Collect 'usage' data:
+            http://docs.ceph.com/docs/master/radosgw/adminops/#get-usage
+        * Collect 'bucket' data:
+            http://docs.ceph.com/docs/master/radosgw/adminops/#get-bucket-info
+        """
+
+        start = time.time()
+        # setup empty prometheus metrics
+        self._setup_empty_prometheus_metrics(args="")
+
+        # setup dict for aggregating bucket usage accross "bins"
+        self.usage_dict = defaultdict(dict)
+
+        # populate metrics with data
+        if self.rgw_usage:
+            for entry in self.rgw_usage["entries"]:
+                self._get_usage(entry)
+            self._update_usage_metrics()
+
+        if self.rgw_bucket:
+            for bucket in self.rgw_bucket:
+                self._get_bucket_usage(bucket)
+
+        if self.rgw_users:
+            for user in self.rgw_users:
+                self._get_user_info(user)
+
+        duration = time.time() - start
+        self._prometheus_metrics["scrape_duration_seconds"].add_metric([], duration)
+
+        for metric in list(self._prometheus_metrics.values()):
+            yield metric
 
     def _setup_empty_prometheus_metrics(self, args):
         """
@@ -456,27 +489,11 @@ class RADOSGWCollector(object):
             # Hammer junk, just skip it
             pass
 
-    def _get_rgw_users(self):
-        """
-        API request to get users.
-        """
-
-        rgw_users = self._request_data(query="user", args="list")
-
-        if rgw_users and "keys" in rgw_users:
-            return rgw_users["keys"]
-        else:
-            # Compat with old Ceph versions (pre 12.2.13/13.2.9)
-            rgw_metadata_users = self._request_data(query="metadata/user", args="")
-            return rgw_metadata_users
-
-        return
-
     def _get_user_info(self, user):
         """
         Method to get the info on a specific user(s).
         """
-        user_info = self._request_data(
+        user_info = self.collector._request_data(
             query="user", args="uid={0}&stats=True".format(user)
         )
         logging.debug((json.dumps(user_info, indent=4, sort_keys=True)))
